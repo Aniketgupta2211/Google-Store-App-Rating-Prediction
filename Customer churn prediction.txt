@@ -1,0 +1,204 @@
+/* Importing dataset*/
+
+PROC IMPORT
+	DATAFILE='/home/u58923455/Project/Life Insurance Dataset.csv'
+	OUT=WORK.life_insurance;
+	DELIMITER=",";
+	GETNAMES=Yes;
+RUN;
+
+PROC PRINT DATA=work.life_insurance (obs=10);
+RUN;
+
+
+
+/* Checking variable type*/
+
+PROC CONTENTS DATA=work.life_insurance;
+RUN;
+
+
+
+
+/* Missing values */
+
+PROC MEANS DATA=work.life_insurance nmiss;
+RUN;
+
+
+
+PROC MEANS DATA=life_insurance n nmiss min p1 p5 p10 p25 p50 p75 p90 p95 p99 max;
+VAR 
+	age Cust_Tenure Overall_cust_satisfation_score CC_Satisfation_score 
+	Cust_Income Agent_Tenure YTD_contact_cnt Due_date_day_cnt 
+	Existing_policy_count Miss_due_date_cnt;
+CLASS churn;
+RUN;
+
+
+
+PROC UNIVARIATE DATA=life_insurance plot;
+VAR 
+	age Cust_Tenure Overall_cust_satisfation_score CC_Satisfation_score 
+	Cust_Income Agent_Tenure YTD_contact_cnt Due_date_day_cnt 
+	Existing_policy_count Miss_due_date_cnt;
+RUN;
+
+DATA work.clean_insurance;
+	SET work.life_insurance;
+/* Capping the outliers */
+if Cust_Income > 31585.5 then Cust_Income = 31585.5;
+if YTD_contact_cnt > 30.5 then YTD_contact_cnt = 30.5;
+if Due_date_day_cnt > 29.75 then Due_date_day_cnt = 29.75;
+if Miss_due_date_cnt > 5 then Miss_due_date_cnt = 5;
+RUN;
+
+
+PROC UNIVARIATE DATA=clean_insurance plot;
+VAR 
+	age Cust_Tenure Overall_cust_satisfation_score CC_Satisfation_score 
+	Cust_Income Agent_Tenure YTD_contact_cnt Due_date_day_cnt 
+	Existing_policy_count Miss_due_date_cnt;
+RUN;
+
+
+
+
+
+PROC FREQ DATA=clean_insurance;
+TABLE Payment_Period Product EducationField Gender Cust_Designation Cust_MaritalStatus /NOCUM;
+RUN;
+
+
+
+
+
+/*Creating Macro*/
+%MACRO cust_info();
+DATA output (keep = age Gender EducationField Cust_Income CustID);
+SET clean_insurance;
+where Mobile_num in (&Mobile_num.);
+RUN;
+
+PROC PRINT DATA=output;
+RUN;
+
+%MEND;
+
+/* Enter mobile number*/
+%let Mobile_num = 9930780130,9880627494;
+
+/*run macro for output*/
+%cust_info;
+
+
+
+
+
+/*Checking correlation*/
+PROC CORR DATA=clean_insurance noprob;
+VAR age 
+    Cust_Tenure 
+    Overall_cust_satisfation_score 
+    CC_Satisfation_score 
+    Cust_Income
+    Agent_Tenure 
+    YTD_contact_cnt 
+    Due_date_day_cnt 
+    Existing_policy_count 
+    Miss_due_date_cnt;
+RUN;
+
+
+
+
+
+
+/*Training and testing data (70:30)*/
+PROC FREQ DATA=clean_insurance;
+	TABLE Churn /NOCUM;
+RUN;
+
+PROC SURVEYSELECT DATA=clean_insurance METHOD=SRS REP=1
+sampsize = 577 
+seed = 1234 
+out = test;
+RUN;
+
+PROC CONTENTS DATA=test varnum;
+RUN;
+
+PROC FREQ DATA=test;
+TABLE Churn /NOCUM;
+RUN;
+
+PROC SQL;
+create table train as select t1.* from clean_insurance as t1
+where CustID not in (select CustID from test);
+QUIT;
+
+
+
+
+
+
+/*Linear regression*/
+
+PROC REG DATA=clean_insurance;
+MODEL churn= age CC_satisfation_score Complaint Cust_income
+Cust_tenure Due_date_day_cnt Existing_policy_count
+Miss_due_date_cnt Overall_cust_satisfation_score YTD_Contact_cnt
+agent_tenure /vif;
+RUN;
+
+
+
+
+
+/*Considering all variables*/
+%let var=age Cust_Tenure Overall_cust_satisfation_score CC_Satisfation_score Cust_Income Agent_Tenure YTD_contact_cnt Due_date_day_cnt Existing_policy_count Miss_due_date_cnt;
+/*Considering only those variables whose P value is 0.05*/
+%let var1=age Cust_Tenure Overall_cust_satisfaction_score CC_Satisfaction_score;
+proc logistic data=train descending outmodel=model;
+model Churn = &var / lackfit;
+output out = train_output xbeta = coeff stdxbeta = stdcoeff predicted = prob;
+run;
+
+
+
+
+%macro perf();
+proc npar1way data=train_output edf;
+class &var1;
+var prob;
+run;
+%mend;
+%let var1=churn;
+%perf;
+
+
+
+
+
+/*Predicting by equation*/
+data test;
+set test;
+prob = 13.0302 - 0.2797*Age - 0.3906*cust_tenure - 0.6815*overall_cust_satisfation_score +
+0.3081*cc_satisfation_score;
+score = exp(prob)/(1+exp(prob));
+run;
+/*creating confusion matrix to get accuracy of the model*/
+data train_output;
+set train_output;
+if prob>0.85 then churn_pred = 1;
+else churn_pred= 0;
+run;
+data test;
+set test;
+if score>0.85 then churn_pred = 1;
+else churn_pred = 0;
+run;
+proc freq data=train_output;
+table churn * churn_pred / nocol norow nopercent; run;
+proc freq data=test;
+table churn * churn_pred / nocol norow nopercent; run;
